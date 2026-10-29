@@ -2,6 +2,7 @@ import os
 import sqlite3
 import secrets
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 from typing import Optional
 
@@ -16,6 +17,7 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "15"))
 SEARCH_TERMS = [x.strip() for x in os.getenv("SEARCH_TERMS", "smartphone,f smartphone,notebook,ssd,memoria ram,monitor,gpu,teclado mecanico,mouse gamer,fone bluetooth,roteador").split(",") if x.strip()]
 SEARCH_INTERVAL_MINUTES = max(30, int(os.getenv("SEARCH_INTERVAL_MINUTES", "180")))
+LOCAL_TZ = ZoneInfo(os.getenv("TZ", "America/Sao_Paulo"))
 scheduler = AsyncIOScheduler(timezone=os.getenv("TZ", "America/Sao_Paulo"))
 app = FastAPI(title="Promo Tech WhatsApp", version="1.0.0")
 
@@ -133,8 +135,20 @@ def update_status(offer_id: int, body: StatusUpdate, x_admin_token: Optional[str
     if body.status not in {"pending", "approved", "published", "rejected"}:
         raise HTTPException(status_code=400, detail="Status inválido")
     with db() as conn:
+        offer = conn.execute("SELECT affiliate_url FROM offers WHERE id=?", (offer_id,)).fetchone()
+        if offer is None:
+            raise HTTPException(status_code=404, detail="Oferta não encontrada")
+        if body.status == "approved" and not offer["affiliate_url"]:
+            raise HTTPException(status_code=400, detail="Adicione o link de afiliado antes de aprovar")
+        if body.status == "published":
+            today = datetime.now(LOCAL_TZ).date().isoformat()
+            published_today = conn.execute("SELECT COUNT(*) FROM offers WHERE status='published' AND substr(published_at,1,10)=?", (today,)).fetchone()[0]
+            if published_today >= DAILY_LIMIT:
+                raise HTTPException(status_code=429, detail=f"Limite diário de {DAILY_LIMIT} publicações atingido")
+            if not offer["affiliate_url"]:
+                raise HTTPException(status_code=400, detail="Adicione o link de afiliado antes de publicar")
         cur = conn.execute("UPDATE offers SET status=?, published_at=? WHERE id=?",
-                           (body.status, datetime.now(timezone.utc).isoformat() if body.status == "published" else None, offer_id))
+                           (body.status, datetime.now(LOCAL_TZ).isoformat() if body.status == "published" else None, offer_id))
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Oferta não encontrada")
     return {"ok": True, "status": body.status}
@@ -145,5 +159,6 @@ def stats(x_admin_token: Optional[str] = Header(default=None)):
     with db() as conn:
         total = conn.execute("SELECT COUNT(*) FROM offers").fetchone()[0]
         pending = conn.execute("SELECT COUNT(*) FROM offers WHERE status='pending'").fetchone()[0]
-        published = conn.execute("SELECT COUNT(*) FROM offers WHERE status='published' AND date(published_at)=date('now')").fetchone()[0]
+        today = datetime.now(LOCAL_TZ).date().isoformat()
+        published = conn.execute("SELECT COUNT(*) FROM offers WHERE status='published' AND substr(published_at,1,10)=?", (today,)).fetchone()[0]
     return {"total": total, "pending": pending, "published_today": published, "daily_target": DAILY_LIMIT}
