@@ -135,12 +135,14 @@ def update_status(offer_id: int, body: StatusUpdate, x_admin_token: Optional[str
     if body.status not in {"pending", "approved", "published", "rejected"}:
         raise HTTPException(status_code=400, detail="Status inválido")
     with db() as conn:
-        offer = conn.execute("SELECT affiliate_url FROM offers WHERE id=?", (offer_id,)).fetchone()
+        offer = conn.execute("SELECT affiliate_url,status FROM offers WHERE id=?", (offer_id,)).fetchone()
         if offer is None:
             raise HTTPException(status_code=404, detail="Oferta não encontrada")
         if body.status == "approved" and not offer["affiliate_url"]:
             raise HTTPException(status_code=400, detail="Adicione o link de afiliado antes de aprovar")
         if body.status == "published":
+            if offer["status"] != "approved":
+                raise HTTPException(status_code=400, detail="Aprove a oferta antes de marcá-la como publicada")
             today = datetime.now(LOCAL_TZ).date().isoformat()
             published_today = conn.execute("SELECT COUNT(*) FROM offers WHERE status='published' AND substr(published_at,1,10)=?", (today,)).fetchone()[0]
             if published_today >= DAILY_LIMIT:
